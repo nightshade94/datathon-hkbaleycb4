@@ -1,0 +1,20 @@
+[project]
+name = "datathon-hkbaleycb4"
+version = "0.1.0"
+description = "Starter repository for a Data Science competition (Datathon)."
+requires-python = ">=3.10"
+dependencies = [
+    "pandas",
+    "numpy",
+    "scikit-learn",
+    "matplotlib",
+    "seaborn",
+    "xgboost",
+    "lightgbm",
+    "shap",
+    "jupyter",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

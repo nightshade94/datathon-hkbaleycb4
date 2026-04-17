@@ -1,3 +1,13 @@
+# Data files (do not commit raw or processed datasets)
+data/**
+!data/
+!data/raw/
+!data/raw/.gitkeep
+!data/processed/
+!data/processed/.gitkeep
+*.csv
+*.parquet
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
