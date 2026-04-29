@@ -140,6 +140,7 @@ def _build_promo_daily_features(
         elif row.promo_type == "fixed":
             promo_daily.loc[mask, "promo_fixed_active_count"] += 1
 
+    promo_daily["promo_is_active"] = (promo_daily["promo_active_count"] > 0).astype("int8")
     return promo_daily
 
 
@@ -324,6 +325,9 @@ def create_daily_feature_store(
         "review_count",
         "avg_rating",
         "promo_active_count",
+        "promo_percentage_active_count",
+        "promo_fixed_active_count",
+        "promo_is_active",
     ]
     daily = _add_lagged_features(daily, lag_candidates)
 
