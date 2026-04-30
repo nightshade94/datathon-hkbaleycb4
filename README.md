@@ -68,6 +68,24 @@ uv run src/forecasting.py
 uv run jupyter notebook
 ```
 
+## Baseline Modeling Quickstart
+
+Run the baseline forecasting script (Linear Regression + Seasonal Naive):
+
+```bash
+uv run src/forecasting.py --method auto
+```
+
+Outputs:
+- `data/processed/submission.csv`
+- `data/processed/baseline_metrics.json`
+
+Supporting bilingual docs:
+- `report/round1_summary.md`
+- `report/baseline_linear_regression.md`
+- `report/baseline_time_series.md`
+- `report/submission_runbook.md`
+
 ## Dependencies
 
 | Package | Purpose |
