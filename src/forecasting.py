@@ -1,4 +1,4 @@
-"""Baseline forecasting script (linear regression + seasonal naive)."""
+"""Baseline forecasting script with leak-safe time-series baselines."""
 
 from __future__ import annotations
 
@@ -37,6 +37,8 @@ def _load_sales(processed_dir: Path, raw_dir: Path) -> pd.DataFrame:
     sales_df = sales_df.dropna(subset=["Date", "Revenue"]).copy()
     sales_df = sales_df.sort_values("Date").drop_duplicates(subset=["Date"], keep="last")
     sales_df["Revenue"] = pd.to_numeric(sales_df["Revenue"], errors="coerce")
+    if "COGS" in sales_df.columns:
+        sales_df["COGS"] = pd.to_numeric(sales_df["COGS"], errors="coerce")
     sales_df = sales_df.dropna(subset=["Revenue"]).reset_index(drop=True)
     return sales_df
 
@@ -62,6 +64,7 @@ def _load_submission_template(processed_dir: Path, raw_dir: Path) -> pd.DataFram
 
 
 def _date_features(dates: pd.Series, origin: pd.Timestamp) -> pd.DataFrame:
+    dates = pd.Series(pd.to_datetime(dates)).reset_index(drop=True)
     days_since = (dates - origin).dt.days.astype(float)
     day_of_week = dates.dt.dayofweek.astype(float)
     month = dates.dt.month.astype(float)
@@ -84,10 +87,15 @@ def _date_features(dates: pd.Series, origin: pd.Timestamp) -> pd.DataFrame:
     )
 
 
-def _fit_linear_regression(train_df: pd.DataFrame, predict_dates: pd.Series) -> np.ndarray:
+def _fit_linear_regression(
+    train_df: pd.DataFrame,
+    predict_dates: pd.Series,
+    *,
+    target: str,
+) -> np.ndarray:
     origin = train_df["Date"].min()
     x_train = _date_features(train_df["Date"], origin)
-    y_train = train_df["Revenue"].to_numpy()
+    y_train = train_df[target].to_numpy()
 
     model = LinearRegression()
     model.fit(x_train, y_train)
@@ -96,23 +104,80 @@ def _fit_linear_regression(train_df: pd.DataFrame, predict_dates: pd.Series) -> 
     return model.predict(x_predict)
 
 
-def _seasonal_naive_predict(history_df: pd.DataFrame, predict_dates: pd.Series) -> np.ndarray:
-    known = {row.Date: float(row.Revenue) for row in history_df.itertuples(index=False)}
-    fallback = float(history_df["Revenue"].iloc[-1])
-    predictions: list[float] = []
+def _seasonal_naive_predict(
+    history_df: pd.DataFrame,
+    predict_dates: pd.Series,
+    *,
+    target: str,
+) -> np.ndarray:
+    known = {
+        pd.Timestamp(row.Date): float(getattr(row, target))
+        for row in history_df[["Date", target]].itertuples(index=False)
+    }
+    fallback = float(history_df[target].iloc[-1])
+    predictions_by_date: dict[pd.Timestamp, float] = {}
 
-    for date in pd.to_datetime(predict_dates).sort_values():
+    sorted_dates = pd.Series(pd.to_datetime(predict_dates)).sort_values()
+    for date in sorted_dates:
+        date = pd.Timestamp(date)
         lag_date = date - pd.Timedelta(days=7)
         if lag_date in known:
             pred = known[lag_date]
         else:
             past_dates = [d for d in known if d < date]
             pred = known[max(past_dates)] if past_dates else fallback
-        predictions.append(float(pred))
+        predictions_by_date[date] = float(pred)
         known[date] = float(pred)
 
-    ordered = pd.DataFrame({"Date": pd.to_datetime(predict_dates), "pred": predictions})
-    return ordered.sort_values("Date")["pred"].to_numpy()
+    return pd.Series(pd.to_datetime(predict_dates)).map(predictions_by_date).to_numpy(dtype=float)
+
+
+def _annual_growth_factor(history_df: pd.DataFrame, target: str) -> tuple[int, float, float]:
+    view = history_df[["Date", target]].copy()
+    view["year"] = view["Date"].dt.year
+    yearly = view.groupby("year", observed=True).agg(value=(target, "mean"), days=(target, "size"))
+    complete_years = yearly[yearly["days"] >= 360]
+    if complete_years.empty:
+        complete_years = yearly
+
+    last_year = int(complete_years.index.max())
+    base_level = float(complete_years.loc[last_year, "value"])
+    pct_change = complete_years["value"].pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    if pct_change.empty:
+        growth = 1.0
+    else:
+        growth = float(np.prod(1.0 + pct_change.clip(lower=-0.95)) ** (1.0 / len(pct_change)))
+    return last_year, base_level, growth
+
+
+def _seasonal_profile_predict(
+    history_df: pd.DataFrame,
+    predict_dates: pd.Series,
+    *,
+    target: str,
+) -> np.ndarray:
+    history = history_df[["Date", target]].dropna().copy()
+    history["year"] = history["Date"].dt.year
+    history["month"] = history["Date"].dt.month
+    history["day"] = history["Date"].dt.day
+    annual_mean = history.groupby("year", observed=True)[target].transform("mean")
+    history["target_norm"] = history[target] / annual_mean.replace(0, np.nan)
+
+    seasonal = (
+        history.groupby(["month", "day"], observed=True)["target_norm"]
+        .mean()
+        .replace([np.inf, -np.inf], np.nan)
+    )
+    last_year, base_level, growth = _annual_growth_factor(history, target)
+
+    predict = pd.DataFrame({"Date": pd.to_datetime(predict_dates)})
+    predict["month"] = predict["Date"].dt.month
+    predict["day"] = predict["Date"].dt.day
+    predict["year"] = predict["Date"].dt.year
+    joined = predict.join(seasonal.rename("seasonal_factor"), on=["month", "day"])
+    joined["seasonal_factor"] = joined["seasonal_factor"].fillna(1.0)
+    joined["years_ahead"] = joined["year"] - last_year
+    return (base_level * np.power(growth, joined["years_ahead"]) * joined["seasonal_factor"]).to_numpy(dtype=float)
 
 
 def _evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
@@ -144,42 +209,69 @@ def train_time_series_model(
     """Train baseline model(s), evaluate, and generate submission."""
     sales_df = _load_sales(processed_dir, raw_dir)
     template_df = _load_submission_template(processed_dir, raw_dir)
+    has_cogs = "COGS" in sales_df.columns
 
     train_df, valid_df = _train_validation_split(sales_df)
     y_valid = valid_df["Revenue"].to_numpy()
 
-    linear_valid = _fit_linear_regression(train_df, valid_df["Date"])
-    naive_valid = _seasonal_naive_predict(train_df, valid_df["Date"])
+    linear_valid = _fit_linear_regression(train_df, valid_df["Date"], target="Revenue")
+    naive_valid = _seasonal_naive_predict(train_df, valid_df["Date"], target="Revenue")
+    seasonal_profile_valid = _seasonal_profile_predict(train_df, valid_df["Date"], target="Revenue")
 
-    linear_metrics = _evaluate(y_valid, linear_valid)
-    naive_metrics = _evaluate(y_valid, naive_valid)
+    method_metrics = {
+        "linear_regression": _evaluate(y_valid, linear_valid),
+        "seasonal_naive": _evaluate(y_valid, naive_valid),
+        "seasonal_profile": _evaluate(y_valid, seasonal_profile_valid),
+    }
 
     if method == "auto":
-        selected_method = (
-            "linear_regression" if linear_metrics["mae"] <= naive_metrics["mae"] else "seasonal_naive"
-        )
+        selected_method = min(method_metrics, key=lambda key: method_metrics[key]["mae"])
     else:
         selected_method = method
 
     if selected_method == "linear_regression":
-        revenue_pred = _fit_linear_regression(sales_df, template_df["Date"])
-        selected_metrics = linear_metrics
+        revenue_pred = _fit_linear_regression(sales_df, template_df["Date"], target="Revenue")
+        cogs_pred = (
+            _fit_linear_regression(sales_df, template_df["Date"], target="COGS")
+            if has_cogs
+            else None
+        )
     elif selected_method == "seasonal_naive":
-        revenue_pred = _seasonal_naive_predict(sales_df, template_df["Date"])
-        selected_metrics = naive_metrics
+        revenue_pred = _seasonal_naive_predict(sales_df, template_df["Date"], target="Revenue")
+        cogs_pred = (
+            _seasonal_naive_predict(sales_df, template_df["Date"], target="COGS")
+            if has_cogs
+            else None
+        )
+    elif selected_method == "seasonal_profile":
+        revenue_pred = _seasonal_profile_predict(sales_df, template_df["Date"], target="Revenue")
+        cogs_pred = (
+            _seasonal_profile_predict(sales_df, template_df["Date"], target="COGS")
+            if has_cogs
+            else None
+        )
     else:
         raise ValueError(f"Unsupported method: {selected_method}")
 
-    submission = template_df.copy()
+    selected_metrics = method_metrics[selected_method]
+    submission = template_df[["Date"]].copy()
     submission["Revenue"] = np.maximum(revenue_pred, 0.0)
-    if "COGS" not in submission.columns:
-        if "COGS" in sales_df.columns:
-            ratio = float((sales_df["COGS"] / sales_df["Revenue"]).replace([np.inf, -np.inf], np.nan).dropna().mean())
+    if cogs_pred is None:
+        ratio = 0.1
+        if has_cogs:
+            ratio = float(
+                (sales_df["COGS"] / sales_df["Revenue"])
+                .replace([np.inf, -np.inf], np.nan)
+                .dropna()
+                .mean()
+            )
             if np.isnan(ratio):
                 ratio = 0.1
-        else:
-            ratio = 0.1
-        submission["COGS"] = submission["Revenue"] * ratio
+        cogs_pred = submission["Revenue"].to_numpy() * ratio
+    submission["COGS"] = np.maximum(cogs_pred, 0.0)
+    submission["COGS"] = np.minimum(submission["COGS"], submission["Revenue"] * 0.99)
+    submission["Date"] = pd.to_datetime(submission["Date"]).dt.strftime("%Y-%m-%d")
+    submission = submission[["Date", "Revenue", "COGS"]]
 
     output_dir.mkdir(parents=True, exist_ok=True)
     submission_path = output_dir / "submission.csv"
@@ -189,9 +281,10 @@ def train_time_series_model(
     payload = {
         "selected_method": selected_method,
         "selected_metrics": selected_metrics,
-        "linear_regression_metrics": linear_metrics,
-        "seasonal_naive_metrics": naive_metrics,
+        "method_metrics": method_metrics,
         "submission_path": str(submission_path),
+        "submission_rows": int(len(submission)),
+        "submission_columns": list(submission.columns),
     }
     metrics_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
@@ -204,7 +297,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("data") / "processed")
     parser.add_argument(
         "--method",
-        choices=["auto", "linear_regression", "seasonal_naive"],
+        choices=["auto", "linear_regression", "seasonal_naive", "seasonal_profile"],
         default="auto",
         help="Forecasting baseline method.",
     )

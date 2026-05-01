@@ -1,71 +1,82 @@
-# Submission Runbook / Hướng dẫn chạy nộp bài
+# Submission Runbook
 
-## VI - Chuẩn bị dữ liệu
+## 1. Environment
 
-Đảm bảo có ít nhất:
+```bash
+uv sync
+```
 
-- `data/raw/sales.csv` (hoặc `data/processed/sales.csv`)
-- `data/raw/sample_submission.csv` (hoặc `data/processed/sample_submission.csv`)
+The repository is reproducible from `pyproject.toml` and `uv.lock`. Raw competition data must be placed locally in `data/raw/`; it is not committed.
 
-## VI - Chạy baseline
+## 2. Generate Processed Data
 
-### Tự chọn model tốt hơn theo MAE (auto)
+```bash
+uv run src/data_prep.py
+```
+
+Expected result:
+
+- Cleaned CSV snapshots under `data/processed/`
+- `data/processed/daily_feature_store.csv`
+
+## 3. Compute Part 1 Answers
+
+```bash
+uv run src/part1_solver.py
+```
+
+Current answers from `data/raw/`:
+
+```text
+Q1: C
+Q2: D
+Q3: B
+Q4: C
+Q5: C
+Q6: A
+Q7: C
+Q8: A
+Q9: A
+Q10: C
+```
+
+Use `uv run src/part1_solver.py --json` to print supporting calculations.
+
+## 4. Regenerate EDA Figures
+
+```bash
+uv run src/visualization.py
+```
+
+Expected result: refreshed PNG files in `images/eda/`.
+
+## 5. Generate Kaggle Submission
 
 ```bash
 uv run src/forecasting.py --method auto
 ```
 
-### Chạy cố định Linear Regression
-
-```bash
-uv run src/forecasting.py --method linear_regression
-```
-
-### Chạy cố định Seasonal Naive
-
-```bash
-uv run src/forecasting.py --method seasonal_naive
-```
-
-## VI - Kết quả đầu ra
+Expected result:
 
 - `data/processed/submission.csv`
 - `data/processed/baseline_metrics.json`
 
-Upload file `submission.csv` lên Kaggle theo đúng định dạng cuộc thi.
+Latest validation metrics:
 
----
+| Selected method | MAE | RMSE | R2 |
+|---|---:|---:|---:|
+| seasonal_profile | 635,253.88 | 889,452.74 | 0.7159 |
 
-## EN - Data prerequisites
+Submission format check:
 
-Ensure at least one location contains:
+- 548 rows
+- Columns exactly `Date,Revenue,COGS`
+- Date order identical to `sample_submission.csv`
+- No missing or negative predictions
 
-- `sales.csv` in `data/raw` or `data/processed`
-- `sample_submission.csv` in `data/raw` or `data/processed`
+## 6. Manual Final Submission
 
-## EN - Run baseline
-
-### Auto-select better model by validation MAE
-
-```bash
-uv run src/forecasting.py --method auto
-```
-
-### Force Linear Regression
-
-```bash
-uv run src/forecasting.py --method linear_regression
-```
-
-### Force Seasonal Naive
-
-```bash
-uv run src/forecasting.py --method seasonal_naive
-```
-
-## EN - Outputs
-
-- `data/processed/submission.csv`
-- `data/processed/baseline_metrics.json`
-
-Upload `submission.csv` to Kaggle with exact required format and row order.
+- Upload `data/processed/submission.csv` to Kaggle.
+- Export and upload the final PDF report using the required NeurIPS template.
+- Include the public or organizer-accessible GitHub repository link.
+- Fill the official form with MCQ answers, Kaggle link, report PDF, student ID photos for all members, and onsite final-round availability confirmation.
